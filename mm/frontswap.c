@@ -20,6 +20,7 @@
 #include <linux/frontswap.h>
 #include <linux/swapfile.h>
 
+static bool frontswap_file = false;
 /*
  * frontswap_ops is set by frontswap_register_ops to contain the pointers
  * to the frontswap "backend" implementation functions.
@@ -127,6 +128,7 @@ struct frontswap_ops *frontswap_register_ops(struct frontswap_ops *ops)
 			if (!sis->frontswap_map)
 				return ERR_PTR(-EINVAL);
 			ops->init(i);
+			printk(KERN_INFO "%d's of %d tree setting\n", i, MAX_SWAPFILES);
 		}
 	}
 	/*
@@ -179,11 +181,19 @@ void __frontswap_init(unsigned type, unsigned long *map)
 	 * p->frontswap set to something valid to work properly.
 	 */
 	frontswap_map_set(sis, map);
-	if (frontswap_ops)
+	if (frontswap_ops){
 		frontswap_ops->init(type);
+		if(!frontswap_file) {
+			frontswap_ops->init(MAX_SWAPFILES);
+			frontswap_file = true;
+			pr_info("frontswap file ops ok\n");
+		}
+		pr_info("frontswap ops ok\n");
+	}
 	else {
 		BUG_ON(type > MAX_SWAPFILES);
 		set_bit(type, need_init);
+		pr_info("frontswap ops fail\n");
 	}
 }
 EXPORT_SYMBOL(__frontswap_init);
@@ -213,7 +223,7 @@ static inline void __frontswap_clear(struct swap_info_struct *sis,
  * offset, the frontswap implementation may either overwrite the data and
  * return success or invalidate the page from frontswap and return failure.
  */
-int __frontswap_store(struct page *page)
+int __frontswap_store(struct page *page, bool kswapd)
 {
 	int ret = -1, dup = 0;
 	swp_entry_t entry = { .val = page_private(page), };
@@ -232,7 +242,7 @@ int __frontswap_store(struct page *page)
 	BUG_ON(sis == NULL);
 	if (__frontswap_test(sis, offset))
 		dup = 1;
-	ret = frontswap_ops->store(type, offset, page);
+	ret = frontswap_ops->store(type, offset, page, kswapd);
 	if (ret == 0) {
 		set_bit(offset, sis->frontswap_map);
 		inc_frontswap_succ_stores();
@@ -254,6 +264,18 @@ int __frontswap_store(struct page *page)
 }
 EXPORT_SYMBOL(__frontswap_store);
 
+int __frontswap_file_store(struct page *page, bool kswapd)
+{
+	int type = MAX_SWAPFILES;
+	pgoff_t offset = page->index;
+
+	if (!frontswap_ops)
+		return -1;
+	BUG_ON(!PageLocked(page));
+
+	return frontswap_ops->store(type, offset, page, kswapd);
+}
+EXPORT_SYMBOL(__frontswap_file_store);
 /*
  * "Get" data from frontswap associated with swaptype and offset that were
  * specified when the data was put to frontswap and use it to fill the
@@ -285,6 +307,19 @@ int __frontswap_load(struct page *page)
 }
 EXPORT_SYMBOL(__frontswap_load);
 
+int __frontswap_file_load(struct page *page)
+{
+	int type = MAX_SWAPFILES;
+	pgoff_t offset = page->index;
+
+	if (!frontswap_ops)
+		return -1;
+	BUG_ON(!PageLocked(page));
+
+	return frontswap_ops->load(type, offset, page);
+}
+EXPORT_SYMBOL(__frontswap_file_load);
+
 /*
  * Invalidate any data from frontswap associated with the specified swaptype
  * and offset so that a subsequent "get" will fail.
@@ -304,6 +339,16 @@ void __frontswap_invalidate_page(unsigned type, pgoff_t offset)
 	}
 }
 EXPORT_SYMBOL(__frontswap_invalidate_page);
+
+void __frontswap_invalidate_file_page(struct page* page)
+{
+	/*
+	 * __frontswap_test() will check whether there is backend registered
+	 */
+	frontswap_ops->invalidate_file_page(page->index, page->mapping->host->i_ino);
+}
+EXPORT_SYMBOL(__frontswap_invalidate_file_page);
+
 
 /*
  * Invalidate all data from frontswap associated with all offsets for the

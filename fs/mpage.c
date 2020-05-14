@@ -29,6 +29,8 @@
 #include <linux/pagevec.h>
 #include <linux/cleancache.h>
 
+#include <linux/frontswap.h>
+
 /*
  * I/O completion handler for multipage BIOs.
  *
@@ -52,6 +54,7 @@ static void mpage_end_io(struct bio *bio, int err)
 		if (--bvec >= bio->bi_io_vec)
 			prefetchw(&bvec->bv_page->flags);
 		if (bio_data_dir(bio) == READ) {
+			// find in zswap & if it exist, compare it.
 			if (uptodate) {
 				SetPageUptodate(page);
 			} else {
@@ -71,9 +74,169 @@ static void mpage_end_io(struct bio *bio, int err)
 	bio_put(bio);
 }
 
+static int bio_remove_bvecs(struct bio *bio)
+{
+	struct bio_vec *bvec = bio->bi_io_vec + bio->bi_vcnt - 1;
+	int removed = 0;
+
+
+	do {
+		if(bvec->bv_len == 0){
+			struct bio_vec *bvec_tmp = bvec;
+			struct bio_vec *bvec_end = bio->bi_io_vec + bio->bi_vcnt - 1;
+
+			while(bvec_tmp < bvec_end)
+			{
+				*bvec_tmp = *(bvec_tmp+1);
+				bvec_tmp += 1;
+			}	
+
+			bio->bi_vcnt -= 1;
+			bio->bi_phys_segments -= 1;
+			removed++;
+		}
+
+		bvec -= 1;
+
+	} while (bvec >= bio->bi_io_vec);
+
+	return removed;
+}
+
+static int bio_split_and_submit(struct bio *bio)
+{
+	struct bio_vec *bvec;
+	unsigned long submit_blocks = 0;
+	unsigned short vcnt = 0;
+	int idx, fidx = bio->bi_idx;
+
+	bio_for_each_segment(bvec, bio, idx){
+
+		unsigned int bvl = bvec->bv_len;
+		struct bio *bio_split;
+		struct page *page = bvec->bv_page;
+
+		if(bvl != 0){
+
+			if(!submit_blocks){
+				bio->bi_idx = idx;
+				bio->bi_sector += (4096 * (idx-fidx)) >> 9;
+				fidx = idx;
+			}
+
+			submit_blocks += 1;
+
+		}
+		else if(submit_blocks){
+
+			//split
+			bio_split = bio_alloc(GFP_KERNEL, submit_blocks);
+
+			if(bio_split)
+			{
+				memcpy(bio_split->bi_io_vec, bio->bi_io_vec + bio->bi_idx,
+						submit_blocks * sizeof(struct bio_vec));
+				bio_split->bi_sector = bio->bi_sector;
+				bio_split->bi_bdev = bio->bi_bdev;
+				bio_split->bi_rw = bio->bi_rw;
+				bio_split->bi_vcnt = submit_blocks;
+				bio_split->bi_size = 4096*submit_blocks;
+				bio_split->bi_idx = 0;
+			}
+			//submit
+			bio_split->bi_end_io = mpage_end_io;
+			submit_bio(READ, bio_split);
+
+			bio->bi_size -= (4096*submit_blocks);
+			vcnt+=(submit_blocks+1);
+			submit_blocks = 0;
+		}
+		else {
+			vcnt += 1;
+		}
+	}
+
+	if(submit_blocks){
+		struct bio *bio_child;
+		bio_child = bio_alloc(GFP_KERNEL, submit_blocks);
+
+		if(bio_child)
+		{
+			memcpy(bio_child->bi_io_vec, bio->bi_io_vec + bio->bi_idx,
+					submit_blocks * sizeof(struct bio_vec));
+			bio_child->bi_sector = bio->bi_sector;
+			bio_child->bi_bdev = bio->bi_bdev;
+			bio_child->bi_rw = bio->bi_rw;
+			bio_child->bi_vcnt = submit_blocks;
+			bio_child->bi_size = 4096*submit_blocks;
+			bio_child->bi_idx = 0;
+		}
+		//submit
+		bio_child->bi_end_io = mpage_end_io;
+		submit_bio(READ, bio_child);
+
+		bio_put(bio);
+		vcnt += submit_blocks;
+		submit_blocks = 0;
+	}
+	else {
+		bio_put(bio);
+	}
+
+	return 1;
+}
+
+static int get_from_zswap(int rw, struct bio *bio)
+{
+	struct bio_vec *bvec = bio->bi_io_vec + bio->bi_vcnt - 1;
+	int idx = bio->bi_vcnt - 1;
+	int first_idx = idx;
+	int debug = 0;
+
+	/* or just each bvec in a bio? */
+	do {
+		struct page *page = bvec->bv_page;
+
+		if(idx < bio->bi_idx){
+			break;
+		}
+
+		if(!page->mapping){
+			printk(KERN_INFO "NO MAP\n");
+			bvec -= 1;
+			idx--;
+			continue;
+		}
+			
+		if(frontswap_load(page) == 0){
+			SetPageUptodate(page);
+			bio->bi_size -= bvec->bv_len;
+			bvec->bv_len = 0;
+			bvec->bv_offset = 4096;
+			unlock_page(page);
+
+			debug++;
+		}
+
+		bvec -= 1;
+		idx--;
+
+	} while (bvec >= bio->bi_io_vec);
+
+
+	if(debug){
+		return bio_split_and_submit(bio);
+	}
+	return 0;
+}
+
 static struct bio *mpage_bio_submit(int rw, struct bio *bio)
 {
 	bio->bi_end_io = mpage_end_io;
+	if(rw == READ){
+		if(get_from_zswap(rw, bio))
+			return NULL;
+	}
 	submit_bio(rw, bio);
 	return NULL;
 }
@@ -410,8 +573,9 @@ int mpage_readpage(struct page *page, get_block_t get_block)
 	map_bh.b_size = 0;
 	bio = do_mpage_readpage(bio, page, 1, &last_block_in_bio,
 			&map_bh, &first_logical_block, get_block);
-	if (bio)
+	if (bio){
 		mpage_bio_submit(READ, bio);
+	}
 	return 0;
 }
 EXPORT_SYMBOL(mpage_readpage);

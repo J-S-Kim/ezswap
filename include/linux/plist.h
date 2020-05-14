@@ -97,6 +97,8 @@ struct plist_node {
 	.node_list = LIST_HEAD_INIT((head).node_list)	\
 }
 
+#define PLIST_HEAD(head) \
+    struct plist_head head = PLIST_HEAD_INIT(head)
 /**
  * PLIST_NODE_INIT - static struct plist_node initializer
  * @node:	struct plist_node variable name

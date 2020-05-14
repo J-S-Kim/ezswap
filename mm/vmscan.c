@@ -50,6 +50,8 @@
 
 #include <linux/swapops.h>
 
+#include <linux/frontswap.h>
+
 #include "internal.h"
 
 #define CREATE_TRACE_POINTS
@@ -739,6 +741,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		struct page *page;
 		int may_enter_fs;
 		enum page_references references = PAGEREF_RECLAIM_CLEAN;
+		int into_zswap = 0;
 
 		cond_resched();
 
@@ -903,7 +906,15 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			case PAGE_CLEAN:
 				; /* try to free the page below */
 			}
+		} else if (likely(page_is_file_cache(page)) && is_page_cache_freeable(page)) {
+			if (!page->mapping)
+				goto fail_clean_swap;
+
+			if (frontswap_store(page, true) == 0)
+				into_zswap = 1;
+			
 		}
+fail_clean_swap:
 
 		/*
 		 * If the page has buffers, try to free the buffer mappings
@@ -983,6 +994,9 @@ activate_locked:
 		SetPageActive(page);
 		pgactivate++;
 keep_locked:
+		if(into_zswap)
+			frontswap_invalidate_file_page(page);
+		
 		unlock_page(page);
 keep:
 		list_add(&page->lru, &ret_pages);

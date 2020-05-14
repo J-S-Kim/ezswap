@@ -208,6 +208,9 @@ PAGEFLAG(Pinned, pinned) TESTSCFLAG(Pinned, pinned)	/* Xen */
 PAGEFLAG(SavePinned, savepinned);			/* Xen */
 PAGEFLAG(Reserved, reserved) __CLEARPAGEFLAG(Reserved, reserved)
 PAGEFLAG(SwapBacked, swapbacked) __CLEARPAGEFLAG(SwapBacked, swapbacked)
+__SETPAGEFLAG(SwapBacked, swapbacked)
+__SETPAGEFLAG(Locked, locked)
+
 
 __PAGEFLAG(SlobFree, slob_free)
 

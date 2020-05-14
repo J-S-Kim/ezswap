@@ -290,6 +290,18 @@ out:
 }
 EXPORT_SYMBOL(radix_tree_preload);
 
+int radix_tree_maybe_preload(gfp_t gfp_mask)
+{
+	if (gfpflags_allow_blocking(gfp_mask))
+		return radix_tree_preload(gfp_mask);
+	/* Preloading doesn't help anything with this gfp mask, skip it */
+	preempt_disable();
+	return 0;
+}
+EXPORT_SYMBOL(radix_tree_maybe_preload);
+
+
+
 /*
  *	Return the maximum key which can be store into a
  *	radix tree with height HEIGHT.

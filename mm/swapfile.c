@@ -58,6 +58,8 @@ static const char Unused_file[] = "Unused swap file entry ";
 static const char Bad_offset[] = "Bad swap offset entry ";
 static const char Unused_offset[] = "Unused swap offset entry ";
 
+PLIST_HEAD(swap_active_head);
+
 struct swap_list_t swap_list = {-1, -1};
 
 struct swap_info_struct *swap_info[MAX_SWAPFILES];
